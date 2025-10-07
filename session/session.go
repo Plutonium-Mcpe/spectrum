@@ -105,10 +105,15 @@ func (s *Session) LoginContext(ctx context.Context) (err error) {
 	go handleServer(s)
 	go handleClient(s)
 	go handleLatency(s, s.opts.LatencyInterval)
+	conn.OnDisconnectLogin(func(pk *packet.Disconnect) {
+		s.CloseWithError(errors.New(pk.Message))
+	})
 	if err := conn.DoConnect(); err != nil {
 		s.logger.Debug("connection sequence failed", "err", err)
 		return err
 	}
+
+	s.logger.Debug("connection sequence started", "addr", serverAddr)
 
 	if err := conn.WaitConnect(s.ctx); err != nil {
 		conn.CloseWithError(fmt.Errorf("connection sequence failed: %w", err))
@@ -167,7 +172,9 @@ func (s *Session) TransferContext(ctx context.Context, addr string) (err error) 
 		s.Processor().ProcessTransferFailure(NewContext(), &origin, &addr)
 		return fmt.Errorf("dialer failed: %w", err)
 	}
-
+	conn.OnDisconnectLogin(func(pk *packet.Disconnect) {
+		s.Processor().ProcessTransferFailureWithMessage(NewContext(), &origin, &addr, &pk.Message)
+	})
 	if err := conn.DoConnect(); err != nil {
 		s.Processor().ProcessTransferFailure(NewContext(), &origin, &addr)
 		return fmt.Errorf("connection sequence failed failed: %w", err)

@@ -63,7 +63,8 @@ type Conn struct {
 	deferredPackets []any
 	expectedIds     []uint32
 
-	onConnect func(err error)
+	onConnect    func(err error)
+	onDisconnect func(pk *packet.Disconnect)
 
 	connected chan struct{}
 	spawned   chan struct{}
@@ -171,7 +172,16 @@ func (c *Conn) DoConnect() error {
 	default:
 	}
 
-	clientData, err := json.Marshal(c.client.ClientData())
+	rawClientData, err := json.Marshal(c.client.ClientData())
+	if err != nil {
+		return err
+	}
+	var clientDataMap map[string]any
+	if err := json.Unmarshal(rawClientData, &clientDataMap); err != nil {
+		return err
+	}
+	delete(clientDataMap, "ThirdPartyNameOnly")
+	clientData, err := json.Marshal(clientDataMap)
 	if err != nil {
 		return err
 	}
@@ -198,6 +208,10 @@ func (c *Conn) DoConnect() error {
 // OnConnect invokes the provided function once the connection sequence is complete or has failed.
 func (c *Conn) OnConnect(fn func(error)) {
 	c.onConnect = fn
+}
+
+func (c *Conn) OnDisconnectLogin(fn func(pk *packet.Disconnect)) {
+	c.onDisconnect = fn
 }
 
 // WaitConnect blocks until the connection sequence has completed or the provided context is canceled.
@@ -310,6 +324,17 @@ func (c *Conn) read() (pk any, err error) {
 
 // deferPacket defers a packet to be returned later in ReadPacket().
 func (c *Conn) deferPacket(pk any) {
+	if pk, ok := pk.(*packet.Disconnect); ok {
+		if c.onDisconnect != nil {
+			c.onDisconnect(pk)
+		} else {
+			c.logger.Warn("onDisconnect callback is nil, ignoring disconnect packet")
+		}
+		return
+	}
+	if pk, ok := pk.(*packet.PlayStatus); ok {
+		c.logger.Warn("received play_status packet before connection sequence finalization, deferring it", "status", pk.Status)
+	}
 	c.deferredPackets = append(c.deferredPackets, pk)
 }
 
