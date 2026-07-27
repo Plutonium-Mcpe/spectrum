@@ -63,8 +63,12 @@ type Conn struct {
 	deferredPackets []any
 	expectedIds     []uint32
 
-	onConnect    func(err error)
-	onDisconnect func(pk *packet.Disconnect)
+	connectMu      sync.Mutex
+	connectFired   bool
+	connectPending bool
+	connectErr     error
+	onConnect      func(err error)
+	onDisconnect   func(pk *packet.Disconnect)
 
 	connected chan struct{}
 	spawned   chan struct{}
@@ -205,9 +209,52 @@ func (c *Conn) DoConnect() error {
 	return nil
 }
 
-// OnConnect invokes the provided function once the connection sequence is complete or has failed.
+// OnConnect invokes the provided function once the connection sequence is
+// complete or has failed. onConnect is written here and read from the read
+// loop, so both sides go through connectMu.
+//
+// The registration may legitimately arrive AFTER the outcome is known: the
+// target answers the whole login sequence in one burst, and on a busy proxy the
+// goroutine driving the transfer can be descheduled between writing the request
+// and registering its callback. fireConnect records the outcome in that case
+// rather than dropping it, and it is delivered here.
 func (c *Conn) OnConnect(fn func(error)) {
+	c.connectMu.Lock()
+	if c.connectFired {
+		c.connectMu.Unlock()
+		return
+	}
 	c.onConnect = fn
+	if !c.connectPending {
+		c.connectMu.Unlock()
+		return
+	}
+	c.connectFired = true
+	err := c.connectErr
+	c.connectMu.Unlock()
+	fn(err)
+}
+
+// fireConnect delivers the outcome of the connection sequence to the registered
+// callback, exactly once for the lifetime of the connection. With no callback
+// registered yet the outcome is held pending instead of being discarded, so the
+// notification survives a registration that loses the race with the read loop.
+func (c *Conn) fireConnect(err error) {
+	c.connectMu.Lock()
+	if c.connectFired {
+		c.connectMu.Unlock()
+		return
+	}
+	fn := c.onConnect
+	if fn == nil {
+		c.connectPending = true
+		c.connectErr = err
+		c.connectMu.Unlock()
+		return
+	}
+	c.connectFired = true
+	c.connectMu.Unlock()
+	fn(err)
 }
 
 func (c *Conn) OnDisconnectLogin(fn func(pk *packet.Disconnect)) {
@@ -270,8 +317,8 @@ func (c *Conn) CloseWithError(err error) {
 		default:
 		}
 
-		if !connected && c.onConnect != nil {
-			c.onConnect(err)
+		if !connected {
+			c.fireConnect(err)
 		}
 		c.cancelFunc(err)
 		_ = c.conn.Close()
@@ -463,8 +510,6 @@ func (c *Conn) handlePlayStatus(pk *packet.PlayStatus) error {
 	c.logger.Debug("received play_status, finalizing connection sequence")
 	c.deferPacket(pk)
 	close(c.connected)
-	if c.onConnect != nil {
-		c.onConnect(nil)
-	}
+	c.fireConnect(nil)
 	return nil
 }
