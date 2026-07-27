@@ -175,11 +175,17 @@ func (s *Session) TransferContext(ctx context.Context, addr string) (err error) 
 	conn.OnDisconnectLogin(func(pk *packet.Disconnect) {
 		s.Processor().ProcessTransferFailureWithMessage(NewContext(), &origin, &addr, &pk.Message)
 	})
-	if err := conn.DoConnect(); err != nil {
-		s.Processor().ProcessTransferFailure(NewContext(), &origin, &addr)
-		return fmt.Errorf("connection sequence failed failed: %w", err)
-	}
-
+	// Registered BEFORE DoConnect, never after. DoConnect writes the
+	// ConnectionRequest, and the target answers the whole login sequence in a
+	// single burst: on a busy proxy the goroutine running this function can be
+	// descheduled right after DoConnect returns, long enough for the read loop
+	// to reach handlePlayStatus. It would then find onConnect still nil, skip
+	// it, and close(connected) means nothing ever calls it again — the transfer
+	// silently never finalizes. ProcessPostTransfer is never invoked, so a
+	// proxy that gates client input on the transfer window keeps dropping it
+	// forever: the target has the player fully logged in and hears nothing from
+	// them. Registering first makes the window impossible, since no answer can
+	// arrive before the request is written.
 	conn.OnConnect(func(err error) {
 		if err != nil {
 			s.Processor().ProcessTransferFailure(NewContext(), &origin, &addr)
@@ -198,6 +204,10 @@ func (s *Session) TransferContext(ctx context.Context, addr string) (err error) 
 		s.Processor().ProcessPostTransfer(NewContext(), &origin, &addr)
 		s.logger.Debug("transferred session", "origin", origin, "target", addr)
 	})
+	if err := conn.DoConnect(); err != nil {
+		s.Processor().ProcessTransferFailure(NewContext(), &origin, &addr)
+		return fmt.Errorf("connection sequence failed failed: %w", err)
+	}
 	return nil
 }
 
