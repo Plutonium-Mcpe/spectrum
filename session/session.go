@@ -287,6 +287,13 @@ func (s *Session) Close() (err error) {
 
 func (s *Session) CloseWithError(err error) {
 	s.once.Do(func() {
+		// Cancel the session context first. It gates dial() and every context derived
+		// from it, so a transfer racing with this close aborts instead of handing a
+		// freshly dialled server connection to a session that will never close it
+		// again: once has already fired, and that connection would stay open on the
+		// backend as a player who is no longer here. It also releases the handler
+		// goroutines, which otherwise keep running until the client socket dies.
+		s.cancelFunc(err)
 		message := err.Error()
 		s.Processor().ProcessDisconnection(NewContext(), &message)
 		_ = s.client.WritePacket(&packet.Disconnect{Message: message})
@@ -319,6 +326,13 @@ func (s *Session) dial(ctx context.Context, addr string) (*server.Conn, error) {
 	conn, err := s.transport.Dial(ctx, addr)
 	if err != nil {
 		return nil, err
+	}
+	// Dialling can take seconds, and the check above happened before the lock was
+	// taken. If the session was closed meanwhile, nothing would ever close this
+	// connection.
+	if err := s.ctx.Err(); err != nil {
+		_ = conn.Close()
+		return nil, context.Cause(s.ctx)
 	}
 	c := server.NewConn(conn, s.client, s.logger.With("addr", addr), s.opts.SyncProtocol, s.Cache())
 	s.serverAddr = addr
