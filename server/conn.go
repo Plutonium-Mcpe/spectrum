@@ -380,7 +380,9 @@ func (c *Conn) deferPacket(pk any) {
 		return
 	}
 	if pk, ok := pk.(*packet.PlayStatus); ok {
-		c.logger.Warn("received play_status packet before connection sequence finalization, deferring it", "status", pk.Status)
+		// Expected on every login: the target answers the whole sequence in one
+		// burst, so play_status lands before we finalise.
+		c.logger.Debug("deferring play_status received during the login burst", "status", pk.Status)
 	}
 	c.deferredPackets = append(c.deferredPackets, pk)
 }
