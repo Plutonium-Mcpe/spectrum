@@ -115,7 +115,7 @@ func (s *Session) LoginContext(ctx context.Context) (err error) {
 
 	s.logger.Debug("connection sequence started", "addr", serverAddr)
 
-	if err := conn.WaitConnect(s.ctx); err != nil {
+	if err := conn.WaitConnect(ctx); err != nil {
 		conn.CloseWithError(fmt.Errorf("connection sequence failed: %w", err))
 		s.logger.Debug("connection sequence failed", "err", err)
 		return err
@@ -169,11 +169,15 @@ func (s *Session) TransferContext(ctx context.Context, addr string) (err error) 
 	s.sendMetadata(true)
 	conn, err := s.dial(ctx, addr)
 	if err != nil {
-		s.Processor().ProcessTransferFailure(NewContext(), &origin, &addr)
+		s.Processor().ProcessTransferFailure(NewContext(), &origin, &addr, err)
 		return fmt.Errorf("dialer failed: %w", err)
 	}
+	// A Disconnect during the login burst is delivered through this callback, not
+	// through OnConnect: the read loop hands it to onDisconnect and stops there.
+	// Without it the transfer would hang until the context times out instead of
+	// failing with the reason the target gave.
 	conn.OnDisconnectLogin(func(pk *packet.Disconnect) {
-		s.Processor().ProcessTransferFailureWithMessage(NewContext(), &origin, &addr, &pk.Message)
+		s.Processor().ProcessTransferFailure(NewContext(), &origin, &addr, errors.New(pk.Message))
 	})
 	// Registered BEFORE DoConnect, never after. DoConnect writes the
 	// ConnectionRequest, and the target answers the whole login sequence in a
@@ -188,7 +192,7 @@ func (s *Session) TransferContext(ctx context.Context, addr string) (err error) 
 	// arrive before the request is written.
 	conn.OnConnect(func(err error) {
 		if err != nil {
-			s.Processor().ProcessTransferFailure(NewContext(), &origin, &addr)
+			s.Processor().ProcessTransferFailure(NewContext(), &origin, &addr, err)
 			return
 		}
 
@@ -196,7 +200,7 @@ func (s *Session) TransferContext(ctx context.Context, addr string) (err error) 
 		s.animation.Play(s.client, gameData)
 		s.sendGameData(conn.GameData())
 		if err := conn.DoSpawn(); err != nil {
-			s.Processor().ProcessTransferFailure(NewContext(), &origin, &addr)
+			s.Processor().ProcessTransferFailure(NewContext(), &origin, &addr, err)
 			return
 		}
 		s.inFallback.Store(false)
@@ -205,8 +209,8 @@ func (s *Session) TransferContext(ctx context.Context, addr string) (err error) 
 		s.logger.Debug("transferred session", "origin", origin, "target", addr)
 	})
 	if err := conn.DoConnect(); err != nil {
-		s.Processor().ProcessTransferFailure(NewContext(), &origin, &addr)
-		return fmt.Errorf("connection sequence failed failed: %w", err)
+		s.Processor().ProcessTransferFailure(NewContext(), &origin, &addr, err)
+		return fmt.Errorf("connection sequence failed: %w", err)
 	}
 	return nil
 }
@@ -298,11 +302,10 @@ func (s *Session) CloseWithError(err error) {
 		s.Processor().ProcessDisconnection(NewContext(), &message)
 		_ = s.client.WritePacket(&packet.Disconnect{Message: message})
 		_ = s.client.Close()
-		s.serverMu.RLock()
-		if s.serverConn != nil {
-			s.serverConn.CloseWithError(err)
+		if conn := s.Server(); conn != nil {
+			conn.CloseWithError(err)
 		}
-		s.serverMu.RUnlock()
+		s.cancelFunc(err)
 		s.registry.RemoveSession(s.client.IdentityData().XUID)
 		s.logger.Info("closed session", "err", err)
 	})
@@ -313,7 +316,7 @@ func (s *Session) CloseWithError(err error) {
 func (s *Session) dial(ctx context.Context, addr string) (*server.Conn, error) {
 	select {
 	case <-s.ctx.Done():
-		return nil, errors.New("session is closed")
+		return nil, context.Cause(s.ctx)
 	default:
 	}
 
@@ -352,15 +355,27 @@ func (s *Session) fallback() error {
 		return errors.New("already in fallback")
 	}
 
+	s.serverMu.RLock()
+	origin := s.serverAddr
+	s.serverMu.RUnlock()
+	processorCtx := NewContext()
 	addr, err := s.discovery.DiscoverFallback(s.client)
 	if err != nil {
+		s.Processor().ProcessFallbackFailure(processorCtx, &origin, nil, err)
 		return fmt.Errorf("discovery failed: %w", err)
+	}
+
+	s.Processor().ProcessPreFallback(processorCtx, &origin, &addr)
+	if processorCtx.Cancelled() {
+		return errors.New("processor failed")
 	}
 
 	s.logger.Debug("transferring session to a fallback server", "addr", addr)
 	if err := s.Transfer(addr); err != nil {
+		s.Processor().ProcessFallbackFailure(processorCtx, &origin, &addr, err)
 		return fmt.Errorf("transfer failed: %w", err)
 	}
+	s.Processor().ProcessPostFallback(processorCtx, &origin, &addr)
 	return nil
 }
 

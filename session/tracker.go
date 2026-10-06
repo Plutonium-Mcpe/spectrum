@@ -104,8 +104,8 @@ func (t *tracker) clearPlayers(s *Session) {
 	entries := make([]protocol.PlayerListEntry, 0)
 	t.players.Each(func(i [16]byte) bool {
 		entries = append(entries, protocol.PlayerListEntry{
-			ActionType: protocol.PlayerListActionRemove,
 			UUID:       i,
+			ActionType: protocol.PlayerListActionRemove,
 		})
 		return true
 	})
