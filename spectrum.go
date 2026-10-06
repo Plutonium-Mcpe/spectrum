@@ -3,7 +3,10 @@ package spectrum
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
+	"sync"
 
 	"github.com/cooldogedev/spectrum/server"
 	"github.com/cooldogedev/spectrum/session"
@@ -18,8 +21,12 @@ type Spectrum struct {
 	discovery server.Discovery
 	transport tr.Transport
 
-	listener *minecraft.Listener
-	registry *session.Registry
+	listener  *minecraft.Listener
+	listeners []*minecraft.Listener
+	accepted  chan acceptResult
+	closeOnce sync.Once
+	closed    chan struct{}
+	registry  *session.Registry
 
 	logger *slog.Logger
 	opts   util.Opts
@@ -40,11 +47,19 @@ func NewSpectrum(discovery server.Discovery, logger *slog.Logger, opts *util.Opt
 		discovery: discovery,
 		transport: transport,
 
+		accepted: make(chan acceptResult),
+		closed:   make(chan struct{}),
 		registry: session.NewRegistry(),
 
 		logger: logger,
 		opts:   *opts,
 	}
+}
+
+// acceptResult carries a connection accepted by one of the listeners, or the error that ended it.
+type acceptResult struct {
+	conn net.Conn
+	err  error
 }
 
 // Listen sets up a minecraft.Listener for incoming connections based on the provided minecraft.ListenConfig.
@@ -55,21 +70,62 @@ func (s *Spectrum) Listen(config minecraft.ListenConfig) (err error) {
 		s.logger.Error("failed to listen", "err", err)
 		return err
 	}
-	s.listener = listener
+	s.addListener(listener)
 	s.logger.Info("started listening", "addr", listener.Addr())
 	return nil
+}
+
+// ListenNetwork sets up an additional minecraft.Listener on the given minecraft.Network, such as a
+// NetherNet network, next to the RakNet listener created by Listen. Connections accepted by every
+// listener are handed out by Accept in the order they arrive.
+func (s *Spectrum) ListenNetwork(config minecraft.ListenConfig, network minecraft.Network, address string) (err error) {
+	listener, err := config.ListenNetwork(network, address)
+	if err != nil {
+		s.logger.Error("failed to listen", "network", fmt.Sprintf("%T", network), "err", err)
+		return err
+	}
+	s.addListener(listener)
+	s.logger.Info("started listening", "network", fmt.Sprintf("%T", network), "addr", listener.Addr())
+	return nil
+}
+
+// addListener registers the listener and starts forwarding the connections it accepts to Accept. The first
+// listener registered is the one returned by Listener.
+func (s *Spectrum) addListener(listener *minecraft.Listener) {
+	if s.listener == nil {
+		s.listener = listener
+	}
+	s.listeners = append(s.listeners, listener)
+	go func() {
+		for {
+			c, err := listener.Accept()
+			select {
+			case s.accepted <- acceptResult{conn: c, err: err}:
+			case <-s.closed:
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
 }
 
 // Accept accepts an incoming minecraft.Conn and creates a new session for it.
 // This method should be called in a loop to continuously accept new connections.
 func (s *Spectrum) Accept() (*session.Session, error) {
-	c, err := s.listener.Accept()
-	if err != nil {
-		s.logger.Error("failed to accept session", "err", err)
-		return nil, err
+	var result acceptResult
+	select {
+	case result = <-s.accepted:
+	case <-s.closed:
+		return nil, net.ErrClosed
+	}
+	if result.err != nil {
+		s.logger.Error("failed to accept session", "err", result.err)
+		return nil, result.err
 	}
 
-	conn := c.(*minecraft.Conn)
+	conn := result.conn.(*minecraft.Conn)
 	identityData := conn.IdentityData()
 	logger := s.logger.With("username", identityData.DisplayName)
 	newSession := session.NewSession(conn, logger, s.registry, s.discovery, s.opts, s.transport)
@@ -97,9 +153,14 @@ func (s *Spectrum) Opts() util.Opts {
 	return s.opts
 }
 
-// Listener returns the listener instance.
+// Listener returns the first listener instance, the RakNet one when Listen was called first.
 func (s *Spectrum) Listener() *minecraft.Listener {
 	return s.listener
+}
+
+// Listeners returns every listener instance, in the order they were registered.
+func (s *Spectrum) Listeners() []*minecraft.Listener {
+	return s.listeners
 }
 
 // Registry returns the session registry instance.
@@ -112,10 +173,16 @@ func (s *Spectrum) Transport() tr.Transport {
 	return s.transport
 }
 
-// Close closes the listener and stops listening for incoming connections.
-func (s *Spectrum) Close() error {
+// Close closes every listener and stops listening for incoming connections.
+func (s *Spectrum) Close() (err error) {
 	for _, activeSession := range s.registry.GetSessions() {
 		activeSession.Disconnect(s.opts.ShutdownMessage)
 	}
-	return s.listener.Close()
+	s.closeOnce.Do(func() { close(s.closed) })
+	for _, listener := range s.listeners {
+		if closeErr := listener.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}
+	return err
 }
