@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"slices"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/cooldogedev/spectrum/protocol"
 	spectrumpacket "github.com/cooldogedev/spectrum/server/packet"
@@ -69,6 +71,11 @@ type Conn struct {
 	connectErr     error
 	onConnect      func(err error)
 	onDisconnect   func(pk *packet.Disconnect)
+
+	// sequenceStart marque l'envoi du connection_request. Chaque etape de la
+	// sequence de login journalise son ecart depuis ce point : c'est le seul moyen
+	// de voir laquelle des etapes coute, le total ne disant que "c'etait lent".
+	sequenceStart atomic.Int64
 
 	connected chan struct{}
 	spawned   chan struct{}
@@ -205,8 +212,18 @@ func (c *Conn) DoConnect() error {
 	if err != nil {
 		return err
 	}
+	c.sequenceStart.Store(time.Now().UnixNano())
 	c.logger.Debug("sent connection_request, expecting connection_response")
 	return nil
+}
+
+// sinceRequest donne le temps ecoule depuis l'envoi du connection_request.
+func (c *Conn) sinceRequest() time.Duration {
+	start := c.sequenceStart.Load()
+	if start == 0 {
+		return 0
+	}
+	return time.Duration(time.Now().UnixNano() - start)
 }
 
 // OnConnect invokes the provided function once the connection sequence is
@@ -433,7 +450,7 @@ func (c *Conn) handlePacket(p packet.Packet) (err error) {
 
 // handleConnectionResponse handles the ConnectionResponse packet.
 func (c *Conn) handleConnectionResponse(pk *spectrumpacket.ConnectionResponse) error {
-	c.logger.Debug("received connection_response, expecting start_game")
+	c.logger.Debug("received connection_response, expecting start_game", "since_request", c.sinceRequest().Round(time.Millisecond))
 	c.expect(packet.IDStartGame)
 	c.runtimeID = pk.RuntimeID
 	c.uniqueID = pk.UniqueID
@@ -442,7 +459,7 @@ func (c *Conn) handleConnectionResponse(pk *spectrumpacket.ConnectionResponse) e
 
 // handleStartGame handles the StartGame packet.
 func (c *Conn) handleStartGame(pk *packet.StartGame) error {
-	c.logger.Debug("received start_game, expecting item_registry")
+	c.logger.Debug("received start_game, expecting item_registry", "since_request", c.sinceRequest().Round(time.Millisecond))
 	c.expect(packet.IDItemRegistry)
 	c.gameData = minecraft.GameData{
 		Difficulty:                   pk.Difficulty,
@@ -482,7 +499,7 @@ func (c *Conn) handleStartGame(pk *packet.StartGame) error {
 
 // handleItemRegistry handles the ItemRegistry packet.
 func (c *Conn) handleItemRegistry(pk *packet.ItemRegistry) error {
-	c.logger.Debug("received item_registry, expecting chunk_radius_updated")
+	c.logger.Debug("received item_registry, expecting chunk_radius_updated", "since_request", c.sinceRequest().Round(time.Millisecond))
 	c.deferPacket(pk)
 	c.expect(packet.IDChunkRadiusUpdated)
 	c.gameData.Items = pk.Items
@@ -501,7 +518,7 @@ func (c *Conn) handleItemRegistry(pk *packet.ItemRegistry) error {
 // handleChunkRadiusUpdated handles the first ChunkRadiusUpdated packet, which updates the initial chunk
 // radius of the connection.
 func (c *Conn) handleChunkRadiusUpdated(pk *packet.ChunkRadiusUpdated) error {
-	c.logger.Debug("received chunk_radius_updated, expecting play_status")
+	c.logger.Debug("received chunk_radius_updated, expecting play_status", "since_request", c.sinceRequest().Round(time.Millisecond))
 	c.deferPacket(pk)
 	c.expect(packet.IDPlayStatus)
 	c.gameData.ChunkRadius = pk.ChunkRadius
@@ -511,7 +528,7 @@ func (c *Conn) handleChunkRadiusUpdated(pk *packet.ChunkRadiusUpdated) error {
 // handlePlayStatus handles the first PlayStatus packet. It is the final packet in the connection sequence,
 // it responds to the server with a packet.SetLocalPlayerAsInitialised to finalize the connection sequence and spawn the player.
 func (c *Conn) handlePlayStatus(pk *packet.PlayStatus) error {
-	c.logger.Debug("received play_status, finalizing connection sequence")
+	c.logger.Debug("received play_status, finalizing connection sequence", "since_request", c.sinceRequest().Round(time.Millisecond))
 	c.deferPacket(pk)
 	close(c.connected)
 	c.fireConnect(nil)
