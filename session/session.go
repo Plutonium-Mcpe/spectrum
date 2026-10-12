@@ -132,9 +132,27 @@ func (s *Session) LoginContext(ctx context.Context) (err error) {
 		s.logger.Debug("spawn sequence failed", "err", err)
 		return err
 	}
-	s.registry.AddSession(identityData.XUID, s)
+	if err := s.register(identityData.XUID); err != nil {
+		return err
+	}
 	s.logger.Info("logged in session")
 	return
+}
+
+// register enters the session in the registry, undoing it when the session was
+// already closed. CloseWithError only runs once and cancels the context before it
+// unregisters, so a session that dies anywhere between the handler goroutines
+// starting above and this call would unregister nothing and then be entered here
+// for good: a dead session the registry would hand out until the proxy restarts.
+// Either order is covered — a close that beat us is seen on the context, and one
+// that follows finds our entry and takes it out itself.
+func (s *Session) register(xuid string) error {
+	s.registry.AddSession(xuid, s)
+	if err := context.Cause(s.ctx); err != nil {
+		s.registry.RemoveSessionIf(xuid, s)
+		return err
+	}
+	return nil
 }
 
 // Transfer initiates a transfer to a different server using the specified address.
@@ -306,7 +324,7 @@ func (s *Session) CloseWithError(err error) {
 			conn.CloseWithError(err)
 		}
 		s.cancelFunc(err)
-		s.registry.RemoveSession(s.client.IdentityData().XUID)
+		s.registry.RemoveSessionIf(s.client.IdentityData().XUID, s)
 		s.logger.Info("closed session", "err", err)
 	})
 }
