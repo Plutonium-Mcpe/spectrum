@@ -47,6 +47,46 @@ type Session struct {
 	latency    atomic.Int64
 	inFallback atomic.Bool
 	once       sync.Once
+
+	flushMu    sync.Mutex
+	flushTimer *time.Timer
+}
+
+// scheduleFlush sends what the client has waiting. A server asks for a flush after every batch it
+// hands over, and a server tick hands over several: flushing each one separately makes the client
+// connection compress and encrypt a batch of its own every time, which is where most of the proxy's
+// CPU went. Holding the request for opts.FlushDelay merges the batches of one tick into a single
+// one. The client connection flushes on its own every 50ms, so nothing is ever left waiting longer
+// than that even if this timer never fires.
+func (s *Session) scheduleFlush() error {
+	if s.opts.FlushDelay <= 0 {
+		return s.client.Flush()
+	}
+
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+	if s.flushTimer != nil {
+		return nil
+	}
+	s.flushTimer = time.AfterFunc(s.opts.FlushDelay, func() {
+		s.flushMu.Lock()
+		s.flushTimer = nil
+		s.flushMu.Unlock()
+		if err := s.client.Flush(); err != nil {
+			s.CloseWithError(fmt.Errorf("failed to flush client's buffer: %w", err))
+		}
+	})
+	return nil
+}
+
+// stopFlushTimer drops a pending flush so a closed session leaves nothing armed.
+func (s *Session) stopFlushTimer() {
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+	if s.flushTimer != nil {
+		s.flushTimer.Stop()
+		s.flushTimer = nil
+	}
 }
 
 // NewSession creates a new Session instance using the provided minecraft.Conn.
@@ -324,6 +364,7 @@ func (s *Session) CloseWithError(err error) {
 			conn.CloseWithError(err)
 		}
 		s.cancelFunc(err)
+		s.stopFlushTimer()
 		s.registry.RemoveSessionIf(s.client.IdentityData().XUID, s)
 		s.logger.Info("closed session", "err", err)
 	})

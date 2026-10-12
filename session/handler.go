@@ -46,7 +46,7 @@ loop:
 				continue loop
 			}
 
-			if err := s.client.Flush(); err != nil {
+			if err := s.scheduleFlush(); err != nil {
 				s.CloseWithError(fmt.Errorf("failed to flush client's buffer: %w", err))
 				logError(s, "failed to flush client's buffer", err)
 				break loop

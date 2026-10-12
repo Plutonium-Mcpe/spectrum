@@ -1,5 +1,7 @@
 package util
 
+import "time"
+
 // Opts defines the configuration options for Spectrum.
 type Opts struct {
 	// Addr is the address to listen on.
@@ -8,6 +10,11 @@ type Opts struct {
 	AutoLogin bool `yaml:"auto_login"`
 	// ClientDecode is a list of client packet identifiers that need to be decoded by the proxy.
 	ClientDecode []uint32 `yaml:"client_decode"`
+	// FlushDelay is how long a flush asked for by a server is held so that the batches it sends within
+	// the same tick are compressed and encrypted together instead of one by one. Zero flushes straight
+	// away, which is what the proxy did before this option existed. The client connection flushes on its
+	// own every 50ms regardless, so a delay above that changes nothing.
+	FlushDelay time.Duration `yaml:"flush_delay"`
 	// LatencyInterval is the interval at which the latency of the connection is updated in milliseconds.
 	// Lower intervals provide more accurate latency but use more bandwidth.
 	LatencyInterval int64 `yaml:"latency_interval"`
