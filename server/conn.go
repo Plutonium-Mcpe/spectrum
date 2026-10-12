@@ -65,6 +65,9 @@ type Conn struct {
 	deferredPackets []any
 	expectedIds     []uint32
 
+	// decodeBuf sert de destination a snappy pour les paquets du backend. Voir read().
+	decodeBuf []byte
+
 	connectMu      sync.Mutex
 	connectFired   bool
 	connectPending bool
@@ -356,9 +359,30 @@ func (c *Conn) read() (pk any, err error) {
 		return nil, fmt.Errorf("unknown decode byte marker %v", payload[0])
 	}
 
-	decompressed, err := snappy.Decode(nil, payload[1:])
+	// Une fois le joueur apparu, plus rien n'est differe : le paquet decompresse est
+	// entierement consomme avant la lecture suivante, qui vient de la meme goroutine
+	// (handleServer est le seul appelant de ReadPacket). On peut donc reutiliser le
+	// meme tampon au lieu d'en allouer un de la taille du paquet a chaque fois. Avant
+	// l'apparition, deferPacket garde des paquets de cote : on alloue comme avant.
+	reuse := false
+	select {
+	case <-c.spawned:
+		reuse = true
+	default:
+	}
+
+	var dst []byte
+	if reuse {
+		dst = c.decodeBuf
+	}
+	decompressed, err := snappy.Decode(dst, payload[1:])
 	if err != nil {
 		return nil, err
+	}
+	// snappy rend dst tronque a la taille decodee quand il tient, sinon un tampon neuf :
+	// on garde le plus grand vu, a sa pleine longueur puisque c'est len(dst) qu'il regarde.
+	if reuse && cap(decompressed) > cap(c.decodeBuf) {
+		c.decodeBuf = decompressed[:cap(decompressed)]
 	}
 
 	if payload[0] == packetDecodeNotNeeded {
