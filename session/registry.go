@@ -46,6 +46,18 @@ func (r *Registry) RemoveSession(xuid string) {
 	delete(r.sessions, xuid)
 }
 
+// RemoveSessionIf removes the session registered under xuid only when it is still
+// the one given. A player who reconnects registers a new session under the same
+// xuid, so an unconditional removal by the late close of the previous session
+// would unregister the live one instead.
+func (r *Registry) RemoveSessionIf(xuid string, session *Session) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.sessions[xuid] == session {
+		delete(r.sessions, xuid)
+	}
+}
+
 func (r *Registry) GetSessions() []*Session {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
