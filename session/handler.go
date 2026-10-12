@@ -121,6 +121,11 @@ loop:
 func handleLatency(s *Session, interval int64) {
 	ticker := time.NewTicker(time.Millisecond * time.Duration(interval))
 	defer ticker.Stop()
+	// Le backend qui disparait fait echouer chaque ping jusqu'a ce que la session
+	// meure, ce qui remplit le journal de la meme ligne toutes les interval ms pour
+	// un seul evenement. handleServer est deja en train de basculer ou de fermer :
+	// on signale le premier echec, puis on se tait tant que la cause ne change pas.
+	lastErr := ""
 loop:
 	for {
 		select {
@@ -129,8 +134,13 @@ loop:
 			break loop
 		case <-ticker.C:
 			if err := s.Server().WritePacket(&spectrumpacket.Latency{Latency: s.client.Latency().Milliseconds() * 2, Timestamp: time.Now().UnixMilli()}); err != nil {
-				logError(s, "failed to write latency packet", err)
+				if message := err.Error(); message != lastErr {
+					lastErr = message
+					logError(s, "failed to write latency packet", err)
+				}
+				continue
 			}
+			lastErr = ""
 		}
 	}
 }
