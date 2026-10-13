@@ -15,15 +15,12 @@ require (
 	github.com/coder/websocket v1.8.14 // indirect
 	github.com/coreos/go-oidc/v3 v3.20.0 // indirect
 	github.com/df-mc/go-nethernet v1.0.20-0.20260818142457-6fc1eb6f907c // indirect
-	github.com/df-mc/go-playfab v1.0.0 // indirect
 	github.com/df-mc/go-playfab/v2 v2.0.2 // indirect
-	github.com/df-mc/go-xsapi v1.0.1 // indirect
 	github.com/df-mc/go-xsapi/v2 v2.0.3 // indirect
 	github.com/df-mc/jsonc v1.0.5 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/klauspost/compress v1.19.1 // indirect
-	github.com/pelletier/go-toml v1.9.5 // indirect
 	github.com/pion/datachannel v1.6.2 // indirect
 	github.com/pion/dtls/v3 v3.1.5 // indirect
 	github.com/pion/ice/v4 v4.3.0 // indirect
@@ -51,3 +48,5 @@ require (
 	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 )
+
+replace github.com/sandertv/gophertunnel => github.com/Plutonium-Mcpe/gophertunnel v0.0.0-20261013152900-7314eb708452
