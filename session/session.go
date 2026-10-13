@@ -123,7 +123,10 @@ func (s *Session) LoginContext(ctx context.Context) (err error) {
 
 	gameData := conn.GameData()
 	s.Processor().ProcessStartGame(NewContext(), &gameData)
-	if err := s.client.StartGame(gameData); err != nil {
+	// StartGameContext, pas StartGame : ce dernier se recree son propre delai d'une minute et
+	// ignore le notre. Un client qui cesse de repondre apres le start_game tenait donc le joueur
+	// sur un ecran noir pendant une minute pleine, quel que soit le LoginTimeout demande.
+	if err := s.client.StartGameContext(ctx, gameData); err != nil {
 		s.logger.Debug("startgame sequence failed", "err", err)
 		return err
 	}

@@ -131,7 +131,11 @@ func (s *Spectrum) Accept() (*session.Session, error) {
 	newSession := session.NewSession(conn, logger, s.registry, s.discovery, s.opts, s.transport)
 	if s.opts.AutoLogin {
 		go func() {
-			if err := newSession.Login(); err != nil {
+			login := newSession.Login
+			if s.opts.LoginTimeout > 0 {
+				login = func() error { return newSession.LoginTimeout(s.opts.LoginTimeout) }
+			}
+			if err := login(); err != nil {
 				newSession.Disconnect(err.Error())
 				if !errors.Is(err, context.Canceled) {
 					logger.Error("failed to login session", "err", err)
