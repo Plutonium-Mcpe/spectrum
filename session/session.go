@@ -123,16 +123,24 @@ func (s *Session) LoginContext(ctx context.Context) (err error) {
 
 	gameData := conn.GameData()
 	s.Processor().ProcessStartGame(NewContext(), &gameData)
-	// StartGameContext, pas StartGame : ce dernier se recree son propre delai d'une minute et
+	// SendGameData/AwaitSpawn, pas StartGame : ce dernier se recree son propre delai d'une minute et
 	// ignore le notre. Un client qui cesse de repondre apres le start_game tenait donc le joueur
 	// sur un ecran noir pendant une minute pleine, quel que soit le LoginTimeout demande.
-	if err := s.client.StartGameContext(ctx, gameData); err != nil {
+	if err := s.client.SendGameData(gameData); err != nil {
 		s.logger.Debug("startgame sequence failed", "err", err)
 		return err
 	}
 
+	// Avant d'attendre le client, on ouvre le flux du serveur : ses chunks restent sinon en attente
+	// derriere DoSpawn, et un client qui ne se declare initialise qu'une fois le terrain charge autour
+	// de son point d'apparition ne l'est jamais. Les deux s'attendaient jusqu'au delai de login.
 	if err := conn.DoSpawn(); err != nil {
 		s.logger.Debug("spawn sequence failed", "err", err)
+		return err
+	}
+
+	if err := s.client.AwaitSpawn(ctx); err != nil {
+		s.logger.Debug("startgame sequence failed", "err", err)
 		return err
 	}
 	if err := s.register(identityData.XUID); err != nil {
