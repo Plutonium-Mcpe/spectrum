@@ -79,6 +79,7 @@ type Conn struct {
 
 	connected chan struct{}
 	spawned   chan struct{}
+	spawnOnce atomic.Bool
 	once      sync.Once
 }
 
@@ -292,11 +293,17 @@ func (c *Conn) WaitConnect(ctx context.Context) error {
 
 // DoSpawn sends a SetLocalPlayerAsInitialised packet to spawn the player in the server
 // and signals that packets can now be read.
+// DoSpawn ouvre le flux du serveur et lui annonce le joueur. Elle est sans effet si elle a deja ete
+// appelee : la session la declenche aussi lorsque le client tarde a spawn, et les deux chemins peuvent
+// se croiser.
 func (c *Conn) DoSpawn() error {
 	select {
 	case <-c.ctx.Done():
 		return context.Cause(c.ctx)
 	default:
+	}
+	if !c.spawnOnce.CompareAndSwap(false, true) {
+		return nil
 	}
 	close(c.spawned)
 	return c.WritePacket(&packet.SetLocalPlayerAsInitialised{EntityRuntimeID: c.runtimeID})

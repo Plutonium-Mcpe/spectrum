@@ -15,6 +15,11 @@ type Opts struct {
 	// because a client that stops answering after start_game holds the player on a black screen
 	// for the entire window, with a backend session opened for nothing behind it.
 	LoginTimeout time.Duration `yaml:"login_timeout"`
+	// SpawnStallGrace borne l'attente du spawn du client avant d'ouvrir quand meme le flux du serveur.
+	// Un client qui veut le terrain autour de son point d'apparition avant de se declarer initialise
+	// attend des chunks que DoSpawn retient, et DoSpawn attend ce meme client. Zero conserve l'ordre
+	// strict. Un client normal spawn bien avant ce delai et ne passe jamais par la.
+	SpawnStallGrace time.Duration `yaml:"spawn_stall_grace"`
 	// LatencyInterval is the interval at which the latency of the connection is updated in milliseconds.
 	// Lower intervals provide more accurate latency but use more bandwidth.
 	LatencyInterval int64 `yaml:"latency_interval"`
@@ -32,6 +37,7 @@ func DefaultOpts() *Opts {
 		Addr:            ":19132",
 		AutoLogin:       true,
 		LatencyInterval: 3000,
+		SpawnStallGrace: 5 * time.Second,
 		ShutdownMessage: "Spectrum closed.",
 		SyncProtocol:    false,
 	}
